@@ -2,65 +2,38 @@
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-import sys
-import types
-from types import SimpleNamespace
-
 import pytest
 
+pytest.importorskip("a2a.types")
 
-def _load_store_module():
-    """Load store.py with package-relative imports resolved."""
-    pytest.importorskip("a2a.types")
+from a2a.auth.user import User  # noqa: E402
+from a2a.server.context import ServerCallContext  # noqa: E402
+from a2a.types import Task, TaskState, TaskStatus  # noqa: E402
 
-    project_root = Path(__file__).resolve().parents[3]
-    package_root = project_root / "custom_components" / "ha_a2a"
+from .conftest import load_store  # noqa: E402
 
-    custom_components_pkg = types.ModuleType("custom_components")
-    custom_components_pkg.__path__ = [str(project_root / "custom_components")]
-    sys.modules.setdefault("custom_components", custom_components_pkg)
-
-    ha_a2a_pkg = types.ModuleType("custom_components.ha_a2a")
-    ha_a2a_pkg.__path__ = [str(package_root)]
-    sys.modules.setdefault("custom_components.ha_a2a", ha_a2a_pkg)
-
-    for module_name in (
-        "custom_components.ha_a2a.const",
-        "custom_components.ha_a2a.store",
-    ):
-        if module_name in sys.modules:
-            del sys.modules[module_name]
-
-    const_spec = importlib.util.spec_from_file_location(
-        "custom_components.ha_a2a.const", package_root / "const.py"
-    )
-    assert const_spec and const_spec.loader
-    const_module = importlib.util.module_from_spec(const_spec)
-    sys.modules["custom_components.ha_a2a.const"] = const_module
-    const_spec.loader.exec_module(const_module)
-
-    store_spec = importlib.util.spec_from_file_location(
-        "custom_components.ha_a2a.store", package_root / "store.py"
-    )
-    assert store_spec and store_spec.loader
-    store_module = importlib.util.module_from_spec(store_spec)
-    sys.modules["custom_components.ha_a2a.store"] = store_module
-    store_spec.loader.exec_module(store_module)
-    return store_module
+STORE = load_store()
 
 
-STORE = _load_store_module()
+class _TestUser(User):
+    """Minimal SDK User for test contexts."""
 
-from a2a.server.context import ServerCallContext
-from a2a.types import Task, TaskState, TaskStatus
+    def __init__(self, user_id: str) -> None:
+        self._user_id = user_id
+
+    @property
+    def is_authenticated(self) -> bool:
+        return True
+
+    @property
+    def user_name(self) -> str:
+        return self._user_id
 
 
 def _context(user_id: str) -> ServerCallContext:
     return ServerCallContext(
         state={"ha_user_id": user_id},
-        user=SimpleNamespace(is_authenticated=True, user_name=user_id),
+        user=_TestUser(user_id),
     )
 
 

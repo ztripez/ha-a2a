@@ -24,7 +24,7 @@ ha-logs:
 	@ssh "$(HA_SSH_TARGET)" "ha core logs --follow"
 
 test:
-	pytest tests/components/ha_a2a/test_models.py tests/components/ha_a2a/test_store.py
+	pytest tests/components/ha_a2a/ -v
 
 lint:
-	python -m compileall custom_components/ha_a2a tests/components/ha_a2a
+	python -m compileall -f custom_components/ha_a2a tests/components/ha_a2a

@@ -1,15 +1,26 @@
-"""HTTP endpoints for A2A discovery and JSON-RPC transport."""
+"""HTTP endpoints for A2A discovery and JSON-RPC transport.
+
+Uses the SDK's JSONRPCHandler for all standard method dispatch, validation,
+capability gating, and error formatting. Only the aiohttp transport layer and
+the local ``tasks/list`` extension are handled here.
+"""
 
 from __future__ import annotations
 
-from typing import cast
+import json
+import logging
+from collections.abc import AsyncGenerator
+from typing import Any, cast
 
 from aiohttp import web
+from pydantic import ValidationError
 
 from a2a.server.request_handlers import JSONRPCHandler
 from a2a.types import (
+    A2ARequest,
     CancelTaskRequest,
     DeleteTaskPushNotificationConfigRequest,
+    GetAuthenticatedExtendedCardRequest,
     GetTaskPushNotificationConfigRequest,
     GetTaskRequest,
     InternalError,
@@ -18,15 +29,17 @@ from a2a.types import (
     JSONParseError,
     JSONRPCError,
     JSONRPCErrorResponse,
+    JSONRPCRequest,
     ListTaskPushNotificationConfigRequest,
     MethodNotFoundError,
     SendMessageRequest,
     SendStreamingMessageRequest,
+    SendStreamingMessageResponse,
     SetTaskPushNotificationConfigRequest,
     TaskResubscriptionRequest,
+    UnsupportedOperationError,
 )
 from homeassistant.components import http as ha_http
-from homeassistant.core import Context
 
 from .assistant_registry import AssistantRegistry
 from .const import (
@@ -52,6 +65,17 @@ from .sdk_runtime import (
     build_jsonrpc_handler,
     build_server_call_context,
 )
+
+logger = logging.getLogger(__name__)
+
+# SDK method→model map for standard A2A methods.
+_METHOD_TO_MODEL: dict[str, type] = {
+    model.model_fields["method"].default: model
+    for model in A2ARequest.model_fields["root"].annotation.__args__
+}
+
+# Streaming request types that require SSE responses.
+_STREAMING_TYPES = (SendStreamingMessageRequest, TaskResubscriptionRequest)
 
 
 class A2AAgentCardsView(ha_http.HomeAssistantView):
@@ -101,7 +125,11 @@ class A2AAgentCardView(ha_http.HomeAssistantView):
 
 
 class A2AAgentRpcView(ha_http.HomeAssistantView):
-    """JSON-RPC endpoint for per-assistant A2A operations."""
+    """JSON-RPC endpoint for per-assistant A2A operations.
+
+    Delegates standard A2A methods to the SDK's JSONRPCHandler and handles
+    the local ``tasks/list`` extension directly.
+    """
 
     url = AGENT_RPC_PATH
     name = "api:ha_a2a:agent_rpc"
@@ -110,7 +138,7 @@ class A2AAgentRpcView(ha_http.HomeAssistantView):
     async def post(
         self, request: web.Request, assistant_id: str
     ) -> web.StreamResponse | web.Response:
-        """Handle JSON-RPC method dispatch."""
+        """Route JSON-RPC requests through the SDK handler."""
         hass = request.app[ha_http.KEY_HASS]
         registry = _get_registry(hass)
         runtimes = _get_runtime_cache(hass)
@@ -119,9 +147,10 @@ class A2AAgentRpcView(ha_http.HomeAssistantView):
         if assistant is None:
             raise web.HTTPNotFound(text=f"Unknown assistant ID: {assistant_id}")
 
-        if _validate_a2a_version(request) is False:
-            error_payload = JSONRPCErrorResponse(
-                id=None,
+        # --- A2A version gate ---
+        if not _validate_a2a_version(request):
+            return _json_rpc_error_response(
+                request_id=None,
                 error=JSONRPCError(
                     code=-32013,
                     message="Requested A2A-Version is not supported",
@@ -131,42 +160,51 @@ class A2AAgentRpcView(ha_http.HomeAssistantView):
                     },
                 ),
             )
-            return self.json(
-                error_payload.model_dump(mode="json", by_alias=True, exclude_none=True)
-            )
 
+        # --- Parse body ---
         try:
             body = await request.json()
         except ValueError as err:
-            parse_error = JSONRPCErrorResponse(
-                id=None,
+            return _json_rpc_error_response(
+                request_id=None,
                 error=JSONParseError(message=str(err)),
-            )
-            return self.json(
-                parse_error.model_dump(mode="json", by_alias=True, exclude_none=True)
             )
 
         request_id = body.get("id") if isinstance(body, dict) else None
-        if not isinstance(body, dict):
-            invalid_request = JSONRPCErrorResponse(
-                id=request_id,
-                error=InvalidRequestError(message="JSON-RPC request must be an object"),
-            )
-            return self.json(
-                invalid_request.model_dump(
-                    mode="json", by_alias=True, exclude_none=True
-                )
+
+        # --- Validate base JSON-RPC structure ---
+        try:
+            base_request = JSONRPCRequest.model_validate(body)
+        except ValidationError as exc:
+            return _json_rpc_error_response(
+                request_id=request_id,
+                error=InvalidRequestError(data=json.loads(exc.json())),
             )
 
-        if body.get("jsonrpc") != "2.0":
-            invalid_jsonrpc = JSONRPCErrorResponse(
-                id=request_id,
-                error=InvalidRequestError(message="jsonrpc must be '2.0'"),
+        method = base_request.method
+
+        # --- Local extension: tasks/list (not yet in SDK) ---
+        if method == "tasks/list":
+            runtime = _get_or_create_runtime(runtimes, hass, assistant_id)
+            call_context = build_server_call_context(
+                self.context(request), request=request
             )
-            return self.json(
-                invalid_jsonrpc.model_dump(
-                    mode="json", by_alias=True, exclude_none=True
-                )
+            return _handle_tasks_list(runtime, body, call_context)
+
+        # --- Route to SDK handler ---
+        model_class = _METHOD_TO_MODEL.get(method)
+        if model_class is None:
+            return _json_rpc_error_response(
+                request_id=request_id,
+                error=MethodNotFoundError(),
+            )
+
+        try:
+            specific_request = model_class.model_validate(body)
+        except ValidationError as exc:
+            return _json_rpc_error_response(
+                request_id=request_id,
+                error=InvalidParamsError(data=json.loads(exc.json())),
             )
 
         runtime = _get_or_create_runtime(runtimes, hass, assistant_id)
@@ -177,43 +215,38 @@ class A2AAgentRpcView(ha_http.HomeAssistantView):
         )
         call_context = build_server_call_context(self.context(request), request=request)
 
-        method = body.get("method")
-        if not isinstance(method, str):
-            invalid_method = JSONRPCErrorResponse(
-                id=request_id,
-                error=InvalidRequestError(message="method must be a string"),
-            )
-            return self.json(
-                invalid_method.model_dump(mode="json", by_alias=True, exclude_none=True)
+        if isinstance(specific_request, _STREAMING_TYPES):
+            return await _handle_streaming(
+                handler, specific_request, call_context, request
             )
 
-        if method in {"message/stream", "tasks/resubscribe"}:
-            return await _handle_streaming_method(handler, method, body, call_context)
-
-        return await _handle_unary_method(handler, runtime, method, body, call_context)
+        return await _handle_unary(handler, specific_request, call_context)
 
 
-def _get_registry(hass) -> AssistantRegistry:
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_registry(hass: Any) -> AssistantRegistry:
     """Get configured assistant registry service."""
     domain_data = hass.data.get(DOMAIN)
     if domain_data is None or DATA_REGISTRY not in domain_data:
         raise web.HTTPInternalServerError(text="ha_a2a runtime is not initialized")
-
     return cast(AssistantRegistry, domain_data[DATA_REGISTRY])
 
 
-def _get_runtime_cache(hass) -> dict[str, AssistantRuntime]:
+def _get_runtime_cache(hass: Any) -> dict[str, AssistantRuntime]:
     """Get per-assistant runtime cache."""
     domain_data = hass.data.get(DOMAIN)
     if domain_data is None or DATA_STORE not in domain_data:
         raise web.HTTPInternalServerError(text="ha_a2a runtime is not initialized")
-
     return cast(dict[str, AssistantRuntime], domain_data[DATA_STORE])
 
 
 def _get_or_create_runtime(
     runtimes: dict[str, AssistantRuntime],
-    hass,
+    hass: Any,
     assistant_id: str,
 ) -> AssistantRuntime:
     """Return existing runtime or create one for assistant ID."""
@@ -224,99 +257,75 @@ def _get_or_create_runtime(
     return runtime
 
 
-async def _handle_unary_method(
-    handler: JSONRPCHandler,
-    runtime: AssistantRuntime,
-    method: str,
-    body: dict,
-    call_context,
+def _json_rpc_error_response(
+    *,
+    request_id: str | int | None,
+    error: JSONRPCError,
 ) -> web.Response:
-    """Handle non-streaming JSON-RPC methods with SDK models."""
-    try:
-        if method == "message/send":
-            req = SendMessageRequest.model_validate(body)
-            resp = await handler.on_message_send(req, call_context)
-            return web.json_response(
-                resp.root.model_dump(mode="json", by_alias=True, exclude_none=True)
-            )
-
-        if method == "tasks/get":
-            req = GetTaskRequest.model_validate(body)
-            resp = await handler.on_get_task(req, call_context)
-            return web.json_response(
-                resp.root.model_dump(mode="json", by_alias=True, exclude_none=True)
-            )
-
-        if method == "tasks/cancel":
-            req = CancelTaskRequest.model_validate(body)
-            resp = await handler.on_cancel_task(req, call_context)
-            return web.json_response(
-                resp.root.model_dump(mode="json", by_alias=True, exclude_none=True)
-            )
-
-        if method == "tasks/pushNotificationConfig/set":
-            req = SetTaskPushNotificationConfigRequest.model_validate(body)
-            resp = await handler.set_push_notification_config(req, call_context)
-            return web.json_response(
-                resp.root.model_dump(mode="json", by_alias=True, exclude_none=True)
-            )
-
-        if method == "tasks/pushNotificationConfig/get":
-            req = GetTaskPushNotificationConfigRequest.model_validate(body)
-            resp = await handler.get_push_notification_config(req, call_context)
-            return web.json_response(
-                resp.root.model_dump(mode="json", by_alias=True, exclude_none=True)
-            )
-
-        if method == "tasks/pushNotificationConfig/list":
-            req = ListTaskPushNotificationConfigRequest.model_validate(body)
-            resp = await handler.list_push_notification_config(req, call_context)
-            return web.json_response(
-                resp.root.model_dump(mode="json", by_alias=True, exclude_none=True)
-            )
-
-        if method == "tasks/pushNotificationConfig/delete":
-            req = DeleteTaskPushNotificationConfigRequest.model_validate(body)
-            resp = await handler.delete_push_notification_config(req, call_context)
-            return web.json_response(
-                resp.root.model_dump(mode="json", by_alias=True, exclude_none=True)
-            )
-
-        if method == "tasks/list":
-            return _handle_tasks_list_extension(runtime, body, call_context)
-
-        not_found = JSONRPCErrorResponse(
-            id=body.get("id"),
-            error=MethodNotFoundError(message=f"Method not supported: {method}"),
-        )
-        return web.json_response(
-            not_found.model_dump(mode="json", by_alias=True, exclude_none=True)
-        )
-    except ValueError as err:
-        invalid_state = JSONRPCErrorResponse(
-            id=body.get("id"),
-            error=InvalidParamsError(message=str(err)),
-        )
-        return web.json_response(
-            invalid_state.model_dump(mode="json", by_alias=True, exclude_none=True)
-        )
-    except Exception as err:  # pragma: no cover - safety fallback
-        internal = JSONRPCErrorResponse(
-            id=body.get("id"),
-            error=InternalError(message=str(err)),
-        )
-        return web.json_response(
-            internal.model_dump(mode="json", by_alias=True, exclude_none=True)
-        )
+    """Build a JSON-RPC error response as an aiohttp Response."""
+    payload = JSONRPCErrorResponse(id=request_id, error=error)
+    return web.json_response(
+        payload.model_dump(mode="json", by_alias=True, exclude_none=True)
+    )
 
 
-async def _handle_streaming_method(
+async def _handle_unary(
     handler: JSONRPCHandler,
-    method: str,
-    body: dict,
-    call_context,
+    request_obj: Any,
+    call_context: Any,
+) -> web.Response:
+    """Dispatch a non-streaming request through the SDK handler."""
+    result: Any = None
+    match request_obj:
+        case SendMessageRequest():
+            result = await handler.on_message_send(request_obj, call_context)
+        case CancelTaskRequest():
+            result = await handler.on_cancel_task(request_obj, call_context)
+        case GetTaskRequest():
+            result = await handler.on_get_task(request_obj, call_context)
+        case SetTaskPushNotificationConfigRequest():
+            result = await handler.set_push_notification_config(
+                request_obj, call_context
+            )
+        case GetTaskPushNotificationConfigRequest():
+            result = await handler.get_push_notification_config(
+                request_obj, call_context
+            )
+        case ListTaskPushNotificationConfigRequest():
+            result = await handler.list_push_notification_config(
+                request_obj, call_context
+            )
+        case DeleteTaskPushNotificationConfigRequest():
+            result = await handler.delete_push_notification_config(
+                request_obj, call_context
+            )
+        case GetAuthenticatedExtendedCardRequest():
+            result = await handler.get_authenticated_extended_card(
+                request_obj, call_context
+            )
+        case _:
+            error = UnsupportedOperationError(
+                message=f"Request type {type(request_obj).__name__} is unknown."
+            )
+            result = JSONRPCErrorResponse(id=request_obj.id, error=error)
+
+    if isinstance(result, JSONRPCErrorResponse):
+        return web.json_response(
+            result.model_dump(mode="json", by_alias=True, exclude_none=True)
+        )
+
+    return web.json_response(
+        result.root.model_dump(mode="json", by_alias=True, exclude_none=True)
+    )
+
+
+async def _handle_streaming(
+    handler: JSONRPCHandler,
+    request_obj: SendStreamingMessageRequest | TaskResubscriptionRequest,
+    call_context: Any,
+    ha_request: web.Request,
 ) -> web.StreamResponse:
-    """Handle streaming methods and return SSE responses."""
+    """Dispatch a streaming request and return an SSE response."""
     stream_response = web.StreamResponse(
         status=200,
         reason="OK",
@@ -326,39 +335,37 @@ async def _handle_streaming_method(
             "Connection": "keep-alive",
         },
     )
-    await stream_response.prepare(
-        cast(web.BaseRequest, call_context.state.get("ha_request"))
-    )
+    await stream_response.prepare(ha_request)
 
     try:
-        if method == "message/stream":
-            req = SendStreamingMessageRequest.model_validate(body)
-            stream = handler.on_message_send_stream(req, call_context)
+        stream: AsyncGenerator[SendStreamingMessageResponse, None]
+        if isinstance(request_obj, SendStreamingMessageRequest):
+            stream = handler.on_message_send_stream(request_obj, call_context)
         else:
-            req = TaskResubscriptionRequest.model_validate(body)
-            stream = handler.on_resubscribe_to_task(req, call_context)
+            stream = handler.on_resubscribe_to_task(request_obj, call_context)
 
         async for item in stream:
             payload = item.root.model_dump_json(by_alias=True, exclude_none=True)
             await stream_response.write(f"data: {payload}\n\n".encode())
     except Exception as err:
-        error_response = JSONRPCErrorResponse(
-            id=body.get("id"),
+        logger.exception("Streaming error for %s", type(request_obj).__name__)
+        error_resp = JSONRPCErrorResponse(
+            id=request_obj.id,
             error=InternalError(message=str(err)),
         )
-        payload = error_response.model_dump_json(by_alias=True, exclude_none=True)
+        payload = error_resp.model_dump_json(by_alias=True, exclude_none=True)
         await stream_response.write(f"data: {payload}\n\n".encode())
 
     await stream_response.write_eof()
     return stream_response
 
 
-def _handle_tasks_list_extension(
+def _handle_tasks_list(
     runtime: AssistantRuntime,
     body: dict,
-    call_context,
+    call_context: Any,
 ) -> web.Response:
-    """Handle local typed `tasks/list` extension."""
+    """Handle local typed ``tasks/list`` extension (not yet in SDK)."""
     req = ListTasksRequest.model_validate(body)
     params = req.params
     status = parse_task_state(

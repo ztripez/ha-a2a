@@ -18,6 +18,12 @@ Home Assistant custom integration that exposes Home Assistant Assistants as A2A-
 - A2A Python SDK: `https://github.com/a2aproject/a2a-python`
 - Home Assistant developer docs: `https://developers.home-assistant.io/`
 
+## SDK-First Rules
+- ALWAYS use the A2A Python SDK for protocol handlers, models, validation, and runtime flow when the SDK supports the feature.
+- ONLY implement local typed extensions when a required feature is missing from the SDK.
+- ALWAYS keep local extensions minimal, explicit, and isolated so they can be replaced with native SDK support later.
+- NEVER replace SDK-backed behavior with hand-rolled protocol logic when an SDK path exists.
+
 ## Project Scope
 - Expose each Home Assistant Assistant through a dedicated A2A-facing interface.
 - Implement agent discovery and core task/message lifecycle operations first.

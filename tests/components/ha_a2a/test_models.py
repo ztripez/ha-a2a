@@ -2,55 +2,13 @@
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-import sys
-import types
 import pytest
 
+pytest.importorskip("a2a.types")
 
-def _load_models_module():
-    """Load models.py without importing Home Assistant runtime modules."""
-    pytest.importorskip("a2a.types")
+from .conftest import load_models  # noqa: E402
 
-    project_root = Path(__file__).resolve().parents[3]
-    package_root = project_root / "custom_components" / "ha_a2a"
-
-    custom_components_pkg = types.ModuleType("custom_components")
-    custom_components_pkg.__path__ = [str(project_root / "custom_components")]
-    sys.modules.setdefault("custom_components", custom_components_pkg)
-
-    ha_a2a_pkg = types.ModuleType("custom_components.ha_a2a")
-    ha_a2a_pkg.__path__ = [str(package_root)]
-    sys.modules.setdefault("custom_components.ha_a2a", ha_a2a_pkg)
-
-    for module_name in (
-        "custom_components.ha_a2a.const",
-        "custom_components.ha_a2a.models",
-    ):
-        if module_name in sys.modules:
-            del sys.modules[module_name]
-
-    const_spec = importlib.util.spec_from_file_location(
-        "custom_components.ha_a2a.const", package_root / "const.py"
-    )
-    assert const_spec and const_spec.loader
-    const_module = importlib.util.module_from_spec(const_spec)
-    sys.modules["custom_components.ha_a2a.const"] = const_module
-    const_spec.loader.exec_module(const_module)
-
-    models_spec = importlib.util.spec_from_file_location(
-        "custom_components.ha_a2a.models", package_root / "models.py"
-    )
-    assert models_spec and models_spec.loader
-    models_module = importlib.util.module_from_spec(models_spec)
-    sys.modules["custom_components.ha_a2a.models"] = models_module
-    models_spec.loader.exec_module(models_module)
-
-    return models_module
-
-
-MODELS = _load_models_module()
+MODELS = load_models()
 
 
 def test_build_agent_card_path_escapes_assistant_id() -> None:
