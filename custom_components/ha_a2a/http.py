@@ -16,6 +16,7 @@ from aiohttp import web
 from pydantic import ValidationError
 
 from a2a.server.request_handlers import JSONRPCHandler
+from a2a.utils.errors import ServerError
 from a2a.types import (
     A2ARequest,
     CancelTaskRequest,
@@ -274,40 +275,20 @@ async def _handle_unary(
     request_obj: Any,
     call_context: Any,
 ) -> web.Response:
-    """Dispatch a non-streaming request through the SDK handler."""
-    result: Any = None
-    match request_obj:
-        case SendMessageRequest():
-            result = await handler.on_message_send(request_obj, call_context)
-        case CancelTaskRequest():
-            result = await handler.on_cancel_task(request_obj, call_context)
-        case GetTaskRequest():
-            result = await handler.on_get_task(request_obj, call_context)
-        case SetTaskPushNotificationConfigRequest():
-            result = await handler.set_push_notification_config(
-                request_obj, call_context
-            )
-        case GetTaskPushNotificationConfigRequest():
-            result = await handler.get_push_notification_config(
-                request_obj, call_context
-            )
-        case ListTaskPushNotificationConfigRequest():
-            result = await handler.list_push_notification_config(
-                request_obj, call_context
-            )
-        case DeleteTaskPushNotificationConfigRequest():
-            result = await handler.delete_push_notification_config(
-                request_obj, call_context
-            )
-        case GetAuthenticatedExtendedCardRequest():
-            result = await handler.get_authenticated_extended_card(
-                request_obj, call_context
-            )
-        case _:
-            error = UnsupportedOperationError(
-                message=f"Request type {type(request_obj).__name__} is unknown."
-            )
-            result = JSONRPCErrorResponse(id=request_obj.id, error=error)
+    """Dispatch a non-streaming request through the SDK handler.
+
+    SDK capability-gating decorators (``@validate``) raise ``ServerError``
+    before the handler body runs, so we catch it here and format the
+    protocol-appropriate error response.
+    """
+    try:
+        result = await _dispatch_unary(handler, request_obj, call_context)
+    except ServerError as exc:
+        error = exc.error if exc.error else InternalError()
+        return _json_rpc_error_response(
+            request_id=getattr(request_obj, "id", None),
+            error=error,
+        )
 
     if isinstance(result, JSONRPCErrorResponse):
         return web.json_response(
@@ -319,13 +300,66 @@ async def _handle_unary(
     )
 
 
+async def _dispatch_unary(
+    handler: JSONRPCHandler,
+    request_obj: Any,
+    call_context: Any,
+) -> Any:
+    """Route a validated request to the matching SDK handler method."""
+    match request_obj:
+        case SendMessageRequest():
+            return await handler.on_message_send(request_obj, call_context)
+        case CancelTaskRequest():
+            return await handler.on_cancel_task(request_obj, call_context)
+        case GetTaskRequest():
+            return await handler.on_get_task(request_obj, call_context)
+        case SetTaskPushNotificationConfigRequest():
+            return await handler.set_push_notification_config(request_obj, call_context)
+        case GetTaskPushNotificationConfigRequest():
+            return await handler.get_push_notification_config(request_obj, call_context)
+        case ListTaskPushNotificationConfigRequest():
+            return await handler.list_push_notification_config(
+                request_obj, call_context
+            )
+        case DeleteTaskPushNotificationConfigRequest():
+            return await handler.delete_push_notification_config(
+                request_obj, call_context
+            )
+        case GetAuthenticatedExtendedCardRequest():
+            return await handler.get_authenticated_extended_card(
+                request_obj, call_context
+            )
+        case _:
+            error = UnsupportedOperationError(
+                message=f"Request type {type(request_obj).__name__} is unknown."
+            )
+            return JSONRPCErrorResponse(id=request_obj.id, error=error)
+
+
 async def _handle_streaming(
     handler: JSONRPCHandler,
     request_obj: SendStreamingMessageRequest | TaskResubscriptionRequest,
     call_context: Any,
     ha_request: web.Request,
-) -> web.StreamResponse:
-    """Dispatch a streaming request and return an SSE response."""
+) -> web.StreamResponse | web.Response:
+    """Dispatch a streaming request and return an SSE response.
+
+    SDK capability-gating decorators may raise ``ServerError`` before any
+    events are yielded (e.g. streaming disabled). In that case we return
+    a plain JSON error response instead of opening an SSE stream.
+    """
+    try:
+        if isinstance(request_obj, SendStreamingMessageRequest):
+            stream = handler.on_message_send_stream(request_obj, call_context)
+        else:
+            stream = handler.on_resubscribe_to_task(request_obj, call_context)
+    except ServerError as exc:
+        error = exc.error if exc.error else InternalError()
+        return _json_rpc_error_response(
+            request_id=getattr(request_obj, "id", None),
+            error=error,
+        )
+
     stream_response = web.StreamResponse(
         status=200,
         reason="OK",
@@ -338,12 +372,6 @@ async def _handle_streaming(
     await stream_response.prepare(ha_request)
 
     try:
-        stream: AsyncGenerator[SendStreamingMessageResponse, None]
-        if isinstance(request_obj, SendStreamingMessageRequest):
-            stream = handler.on_message_send_stream(request_obj, call_context)
-        else:
-            stream = handler.on_resubscribe_to_task(request_obj, call_context)
-
         async for item in stream:
             payload = item.root.model_dump_json(by_alias=True, exclude_none=True)
             await stream_response.write(f"data: {payload}\n\n".encode())
