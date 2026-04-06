@@ -10,7 +10,7 @@ from homeassistant.helpers.typing import ConfigType
 
 from .assistant_registry import AssistantRegistry
 from .const import DATA_REGISTRY, DATA_STORE, DOMAIN
-from .http import A2AAgentCardView, A2AAgentCardsView, A2AAgentRpcView
+from .http import A2AAgentCardsView, A2AAgentCardView, A2AAgentRpcView
 from .sdk_runtime import AssistantRuntime
 
 

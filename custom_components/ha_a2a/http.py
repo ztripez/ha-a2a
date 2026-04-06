@@ -9,14 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncGenerator
 from typing import Any, cast
 
-from aiohttp import web
-from pydantic import ValidationError
-
 from a2a.server.request_handlers import JSONRPCHandler
-from a2a.utils.errors import ServerError
 from a2a.types import (
     A2ARequest,
     CancelTaskRequest,
@@ -35,12 +30,14 @@ from a2a.types import (
     MethodNotFoundError,
     SendMessageRequest,
     SendStreamingMessageRequest,
-    SendStreamingMessageResponse,
     SetTaskPushNotificationConfigRequest,
     TaskResubscriptionRequest,
     UnsupportedOperationError,
 )
+from a2a.utils.errors import ServerError
+from aiohttp import web
 from homeassistant.components import http as ha_http
+from pydantic import ValidationError
 
 from .assistant_registry import AssistantRegistry
 from .const import (
@@ -97,7 +94,9 @@ class A2AAgentCardsView(ha_http.HomeAssistantView):
             "agents": [
                 {
                     "assistant_id": agent.assistant_id,
-                    "card_url": f"{base_url}{build_agent_card_path(agent.assistant_id)}",
+                    "card_url": (
+                        f"{base_url}{build_agent_card_path(agent.assistant_id)}"
+                    ),
                     "card": dump_agent_card(build_agent_card(agent, base_url=base_url)),
                 }
                 for agent in agents

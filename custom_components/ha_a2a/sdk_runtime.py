@@ -10,7 +10,7 @@ from a2a.server.context import ServerCallContext
 from a2a.server.events import EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler, JSONRPCHandler
 from a2a.server.tasks import TaskUpdater
-from a2a.types import Message, Part, TextPart
+from a2a.types import Part, TextPart
 from homeassistant.core import Context, HomeAssistant
 
 from .conversation_bridge import async_run_assistant_text

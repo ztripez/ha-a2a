@@ -6,6 +6,8 @@ from homeassistant.components import conversation
 from homeassistant.components.conversation.agent_manager import get_agent_manager
 from homeassistant.components.conversation.const import (
     DATA_COMPONENT as CONVERSATION_DATA_COMPONENT,
+)
+from homeassistant.components.conversation.const import (
     HOME_ASSISTANT_AGENT,
 )
 from homeassistant.core import HomeAssistant

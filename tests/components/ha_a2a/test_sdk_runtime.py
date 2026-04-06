@@ -6,21 +6,10 @@ import pytest
 
 pytest.importorskip("a2a.types")
 
-from a2a.auth.user import User  # noqa: E402
-from a2a.server.context import ServerCallContext  # noqa: E402
-from a2a.server.events import EventQueue  # noqa: E402
-from a2a.types import (  # noqa: E402
-    Message,
-    Part,
-    Task,
-    TaskState,
-    TaskStatus,
-    TaskStatusUpdateEvent,
-    TaskArtifactUpdateEvent,
-    TextPart,
-)
+from a2a.auth.user import User
+from a2a.server.context import ServerCallContext
 
-from .conftest import _ensure_ha_stubs, _load_module, load_const  # noqa: E402
+from .conftest import _ensure_ha_stubs, _load_module, load_const
 
 # Load sdk_runtime with HA stubs
 _ensure_ha_stubs()

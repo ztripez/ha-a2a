@@ -6,7 +6,7 @@ import pytest
 
 pytest.importorskip("a2a.types")
 
-from .conftest import load_models  # noqa: E402
+from .conftest import load_models
 
 MODELS = load_models()
 

@@ -7,31 +7,32 @@ properly catches the resulting ServerError.
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 pytest.importorskip("a2a.types")
 
-from a2a.server.agent_execution import AgentExecutor, RequestContext  # noqa: E402
-from a2a.server.events import EventQueue  # noqa: E402
-from a2a.server.request_handlers import DefaultRequestHandler, JSONRPCHandler  # noqa: E402
-from a2a.server.tasks import InMemoryTaskStore  # noqa: E402
-from a2a.types import (  # noqa: E402
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue
+from a2a.server.request_handlers import (
+    DefaultRequestHandler,
+    JSONRPCHandler,
+)
+from a2a.server.tasks import InMemoryTaskStore
+from a2a.types import (
     AgentCapabilities,
     AgentCard,
     AgentSkill,
     Message,
     MessageSendParams,
     Part,
+    PushNotificationConfig,
     SendMessageRequest,
     SendStreamingMessageRequest,
     SetTaskPushNotificationConfigRequest,
     TaskPushNotificationConfig,
-    PushNotificationConfig,
     TextPart,
 )
-from a2a.utils.errors import ServerError  # noqa: E402
+from a2a.utils.errors import ServerError
 
 
 class _NoOpExecutor(AgentExecutor):

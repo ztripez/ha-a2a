@@ -6,11 +6,11 @@ import pytest
 
 pytest.importorskip("a2a.types")
 
-from a2a.auth.user import User  # noqa: E402
-from a2a.server.context import ServerCallContext  # noqa: E402
-from a2a.types import Task, TaskState, TaskStatus  # noqa: E402
+from a2a.auth.user import User
+from a2a.server.context import ServerCallContext
+from a2a.types import Task, TaskState, TaskStatus
 
-from .conftest import load_store  # noqa: E402
+from .conftest import load_store
 
 STORE = load_store()
 

@@ -8,16 +8,16 @@ import pytest
 
 pytest.importorskip("a2a.types")
 
-from a2a.types import (  # noqa: E402
+from a2a.types import (
     A2ARequest,
+    CancelTaskRequest,
+    GetTaskRequest,
     SendMessageRequest,
     SendStreamingMessageRequest,
-    GetTaskRequest,
-    CancelTaskRequest,
     TaskResubscriptionRequest,
 )
 
-from .conftest import load_http, load_models  # noqa: E402
+from .conftest import load_http, load_models
 
 MODELS = load_models()
 HTTP = load_http()

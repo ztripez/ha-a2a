@@ -7,11 +7,9 @@ homeassistant dependencies and wiring package paths for ``custom_components``.
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
 import sys
 import types
-
-import pytest
+from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PACKAGE_ROOT = PROJECT_ROOT / "custom_components" / "ha_a2a"
