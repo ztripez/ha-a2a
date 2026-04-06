@@ -90,6 +90,7 @@ class A2AAgentCardsView(ha_http.HomeAssistantView):
         base_url = f"{request.scheme}://{request.host}"
 
         agents = await registry.async_list_agents()
+        _evict_stale_runtimes(_get_runtime_cache(hass), agents)
         payload = {
             "agents": [
                 {
@@ -242,6 +243,18 @@ def _get_runtime_cache(hass: Any) -> dict[str, AssistantRuntime]:
     if domain_data is None or DATA_STORE not in domain_data:
         raise web.HTTPInternalServerError(text="ha_a2a runtime is not initialized")
     return cast(dict[str, AssistantRuntime], domain_data[DATA_STORE])
+
+
+def _evict_stale_runtimes(
+    runtimes: dict[str, AssistantRuntime],
+    current_agents: list[Any],
+) -> None:
+    """Remove cached runtimes for assistants no longer in the registry."""
+    active_ids = {agent.assistant_id for agent in current_agents}
+    stale_ids = [rid for rid in runtimes if rid not in active_ids]
+    for rid in stale_ids:
+        del runtimes[rid]
+        logger.info("Evicted stale runtime for assistant %s", rid)
 
 
 def _get_or_create_runtime(

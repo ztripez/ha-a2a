@@ -118,13 +118,204 @@ class TestBuildAssistantRuntime:
 
 
 class TestHaConversationAgentExecutor:
-    """Test executor validation logic (without calling conversation API)."""
+    """Test executor validation and execution paths."""
 
-    def test_rejects_missing_task_id(self) -> None:
+    def _make_executor(self):
         import homeassistant.core as ha_core
 
         hass = ha_core.HomeAssistant()
-        executor = SDK_RT.HaConversationAgentExecutor(hass, "test-assistant")
-        # Ensure the executor class is right
+        return SDK_RT.HaConversationAgentExecutor(hass, "test-assistant")
+
+    def _make_ha_context(self, user_id: str = "user-1"):
+        import homeassistant.core as ha_core
+
+        ctx = ha_core.Context()
+        ctx.user_id = user_id
+        return ctx
+
+    def _make_request_context(
+        self,
+        *,
+        task_id: str | None = "task-1",
+        context_id: str | None = "ctx-1",
+        user_input: str = "Hello",
+        ha_context=None,
+    ):
+        from unittest.mock import MagicMock
+
+        from a2a.server.agent_execution import RequestContext
+
+        if ha_context is None:
+            ha_context = self._make_ha_context()
+
+        call_context = ServerCallContext(
+            state={
+                "ha_user_id": "user-1",
+                "ha_context": ha_context,
+            },
+            user=SDK_RT.HAUser("user-1"),
+        )
+
+        rc = MagicMock(spec=RequestContext)
+        rc.task_id = task_id
+        rc.context_id = context_id
+        rc.call_context = call_context
+        rc.get_user_input.return_value = user_input
+        return rc
+
+    def test_rejects_missing_task_id(self) -> None:
+        executor = self._make_executor()
         assert hasattr(executor, "execute")
         assert hasattr(executor, "cancel")
+
+    async def test_rejects_none_task_id(self) -> None:
+        from a2a.server.events import EventQueue
+
+        executor = self._make_executor()
+        rc = self._make_request_context(task_id=None)
+        eq = EventQueue()
+
+        with pytest.raises(ValueError, match="task_id and context_id"):
+            await executor.execute(rc, eq)
+
+    async def test_rejects_none_context_id(self) -> None:
+        from a2a.server.events import EventQueue
+
+        executor = self._make_executor()
+        rc = self._make_request_context(context_id=None)
+        eq = EventQueue()
+
+        with pytest.raises(ValueError, match="task_id and context_id"):
+            await executor.execute(rc, eq)
+
+    async def test_rejects_missing_call_context(self) -> None:
+        from unittest.mock import MagicMock
+
+        from a2a.server.agent_execution import RequestContext
+        from a2a.server.events import EventQueue
+
+        executor = self._make_executor()
+        rc = MagicMock(spec=RequestContext)
+        rc.task_id = "t-1"
+        rc.context_id = "c-1"
+        rc.call_context = None
+        eq = EventQueue()
+
+        with pytest.raises(ValueError, match="call context"):
+            await executor.execute(rc, eq)
+
+    async def test_execute_happy_path(self) -> None:
+        """Successful conversation produces start_work, artifact, complete."""
+        import sys
+        from unittest.mock import AsyncMock, MagicMock
+
+        from a2a.server.events import EventQueue
+
+        # Patch conversation bridge
+        ha_conv = sys.modules["homeassistant.components.conversation"]
+        mock_result = MagicMock()
+        mock_result.as_dict.return_value = {
+            "response": {
+                "speech": {"plain": {"speech": "Lights turned off."}},
+            },
+        }
+        ha_conv.async_converse = AsyncMock(return_value=mock_result)
+
+        # Reload bridge and runtime to pick up patched converse
+        _load_module("conversation_bridge", "conversation_bridge.py")
+        sdk_rt = _load_module("sdk_runtime", "sdk_runtime.py")
+
+        executor = sdk_rt.HaConversationAgentExecutor(MagicMock(), "test-assistant")
+        rc = self._make_request_context(user_input="Turn off lights")
+        eq = EventQueue()
+
+        await executor.execute(rc, eq)
+
+        # Collect all events (queue is bounded, no_wait drains it)
+        events = []
+        try:
+            while True:
+                event = await eq.dequeue_event(no_wait=True)
+                events.append(event)
+        except Exception:
+            pass  # queue empty
+
+        # Should have: status(working), artifact, status(completed)
+        assert len(events) >= 2
+        from a2a.types import TaskArtifactUpdateEvent, TaskStatusUpdateEvent
+
+        status_events = [e for e in events if isinstance(e, TaskStatusUpdateEvent)]
+        artifact_events = [e for e in events if isinstance(e, TaskArtifactUpdateEvent)]
+        assert len(status_events) >= 2  # working + completed
+        assert len(artifact_events) >= 1
+
+        assert status_events[0].status.state.value == "working"
+        assert status_events[-1].status.state.value == "completed"
+
+    async def test_execute_failure_path(self) -> None:
+        """Exception in conversation produces failed task."""
+        import sys
+        from unittest.mock import AsyncMock, MagicMock
+
+        from a2a.server.events import EventQueue
+
+        ha_conv = sys.modules["homeassistant.components.conversation"]
+        ha_conv.async_converse = AsyncMock(side_effect=RuntimeError("HA is down"))
+
+        _load_module("conversation_bridge", "conversation_bridge.py")
+        sdk_rt = _load_module("sdk_runtime", "sdk_runtime.py")
+
+        executor = sdk_rt.HaConversationAgentExecutor(MagicMock(), "test-assistant")
+        rc = self._make_request_context(user_input="Hello")
+        eq = EventQueue()
+
+        await executor.execute(rc, eq)
+
+        events = []
+        try:
+            while True:
+                event = await eq.dequeue_event(no_wait=True)
+                events.append(event)
+        except Exception:
+            pass
+
+        from a2a.types import TaskStatusUpdateEvent
+
+        status_events = [e for e in events if isinstance(e, TaskStatusUpdateEvent)]
+        assert len(status_events) >= 2
+        assert status_events[0].status.state.value == "working"
+        assert status_events[-1].status.state.value == "failed"
+
+    async def test_cancel_publishes_canceled_state(self) -> None:
+        """Cancel should publish a canceled status event."""
+        from a2a.server.events import EventQueue
+
+        executor = self._make_executor()
+        rc = self._make_request_context()
+        eq = EventQueue()
+
+        await executor.cancel(rc, eq)
+
+        events = []
+        try:
+            while True:
+                event = await eq.dequeue_event(no_wait=True)
+                events.append(event)
+        except Exception:
+            pass
+
+        from a2a.types import TaskStatusUpdateEvent
+
+        status_events = [e for e in events if isinstance(e, TaskStatusUpdateEvent)]
+        assert len(status_events) >= 1
+        assert status_events[-1].status.state.value == "canceled"
+
+    async def test_cancel_rejects_missing_task_id(self) -> None:
+        from a2a.server.events import EventQueue
+
+        executor = self._make_executor()
+        rc = self._make_request_context(task_id=None)
+        eq = EventQueue()
+
+        with pytest.raises(ValueError, match="task_id and context_id"):
+            await executor.cancel(rc, eq)
