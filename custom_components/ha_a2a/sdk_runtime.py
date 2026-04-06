@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from a2a.auth.user import User
@@ -53,12 +54,18 @@ def build_server_call_context(
 
 
 class HaConversationAgentExecutor(AgentExecutor):
-    """AgentExecutor that proxies execution into HA conversation APIs."""
+    """AgentExecutor that proxies execution into HA conversation APIs.
+
+    Tracks in-flight ``asyncio.Task`` objects per ``task_id`` so that
+    ``cancel()`` can abort a running ``async_converse`` call instead of
+    only publishing an advisory canceled state.
+    """
 
     def __init__(self, hass: HomeAssistant, assistant_id: str) -> None:
         """Initialize executor for one assistant ID."""
         self._hass = hass
         self._assistant_id = assistant_id
+        self._inflight: dict[str, asyncio.Task[None]] = {}
 
     async def execute(
         self,
@@ -83,6 +90,7 @@ class HaConversationAgentExecutor(AgentExecutor):
 
         user_text = context.get_user_input()
         try:
+            self._inflight[task_id] = asyncio.current_task()  # type: ignore[assignment]
             assistant_text = await async_run_assistant_text(
                 self._hass,
                 assistant_id=self._assistant_id,
@@ -90,12 +98,20 @@ class HaConversationAgentExecutor(AgentExecutor):
                 user_context=ha_context,
                 context_id=context_id,
             )
+        except asyncio.CancelledError:
+            canceled_message = updater.new_agent_message(
+                parts=[Part(root=TextPart(text="Task was canceled"))]
+            )
+            await updater.cancel(canceled_message)
+            return
         except Exception as err:
             failed_message = updater.new_agent_message(
                 parts=[Part(root=TextPart(text=f"Assistant execution failed: {err}"))]
             )
             await updater.failed(failed_message)
             return
+        finally:
+            self._inflight.pop(task_id, None)
 
         parts = [Part(root=TextPart(text=assistant_text))]
         await updater.add_artifact(
@@ -111,11 +127,23 @@ class HaConversationAgentExecutor(AgentExecutor):
         context: RequestContext,
         event_queue: EventQueue,
     ) -> None:
-        """Publish cancellation state for the requested task."""
+        """Cancel an in-flight or completed task.
+
+        If the task is currently executing, the ``asyncio.Task`` is
+        canceled to abort the running ``async_converse`` call. The
+        ``execute`` method handles ``CancelledError`` and publishes
+        the canceled state. Otherwise, an advisory cancellation event
+        is published directly.
+        """
         task_id = context.task_id
         context_id = context.context_id
         if task_id is None or context_id is None:
             raise ValueError("task_id and context_id are required")
+
+        inflight_task = self._inflight.get(task_id)
+        if inflight_task is not None:
+            inflight_task.cancel()
+            return
 
         updater = TaskUpdater(event_queue, task_id=task_id, context_id=context_id)
         canceled_message = updater.new_agent_message(
