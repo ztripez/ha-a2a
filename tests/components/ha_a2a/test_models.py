@@ -39,3 +39,49 @@ def test_build_agent_card_contains_expected_fields() -> None:
     assert card["capabilities"]["streaming"] is False
     assert card["capabilities"]["pushNotifications"] is False
     assert card["protocolVersion"] == "0.3"
+
+
+def test_agent_card_contains_bearer_security_scheme() -> None:
+    """Card should declare bearer token auth."""
+    agent = MODELS.A2AAssistantAgent(
+        assistant_id="test-assist",
+        name="Test",
+        supports_streaming=False,
+    )
+    card = MODELS.dump_agent_card(
+        MODELS.build_agent_card(agent, base_url="https://ha.local")
+    )
+    assert "bearer" in card["securitySchemes"]
+    scheme = card["securitySchemes"]["bearer"]
+    assert scheme["type"] == "http"
+    assert scheme["scheme"] == "bearer"
+    assert card["security"] == [{"bearer": []}]
+
+
+def test_skill_description_includes_assistant_name() -> None:
+    """Default skill description should reference the assistant name."""
+    agent = MODELS.A2AAssistantAgent(
+        assistant_id="test-assist",
+        name="My Smart Home",
+        supports_streaming=False,
+    )
+    card = MODELS.build_agent_card(agent, base_url="https://ha.local")
+    skill = card.skills[0]
+    assert "My Smart Home" in skill.description
+
+
+def test_custom_skill_overrides() -> None:
+    """Agent with custom skill metadata should override defaults."""
+    agent = MODELS.A2AAssistantAgent(
+        assistant_id="custom-assist",
+        name="Custom",
+        supports_streaming=False,
+        skill_description="Controls the greenhouse.",
+        skill_tags=("greenhouse", "plants"),
+        skill_examples=("Water the tomatoes.",),
+    )
+    card = MODELS.build_agent_card(agent, base_url="https://ha.local")
+    skill = card.skills[0]
+    assert skill.description == "Controls the greenhouse."
+    assert skill.tags == ["greenhouse", "plants"]
+    assert skill.examples == ["Water the tomatoes."]

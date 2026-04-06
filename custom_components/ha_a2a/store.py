@@ -37,8 +37,16 @@ class HaScopedTaskStore(TaskStore):
         self._tasks: dict[str, _ScopedTaskRecord] = {}
 
     async def save(self, task: Task, context: ServerCallContext | None = None) -> None:
-        """Persist or update one task record for the active principal."""
+        """Persist or update one task record for the active principal.
+
+        Raises ValueError when the resolved owner is ``None`` to prevent
+        unauthenticated requests from silently sharing a task namespace.
+        """
         owner_user_id = _owner_from_context(context)
+        if owner_user_id is None:
+            msg = "Cannot save task without an authenticated owner"
+            raise ValueError(msg)
+
         existing = self._tasks.get(task.id)
 
         if existing is None:
@@ -48,7 +56,7 @@ class HaScopedTaskStore(TaskStore):
             )
             return
 
-        if owner_user_id is not None and existing.owner_user_id != owner_user_id:
+        if existing.owner_user_id != owner_user_id:
             return
 
         existing.task = task.model_copy(deep=True)
@@ -56,12 +64,20 @@ class HaScopedTaskStore(TaskStore):
     async def get(
         self, task_id: str, context: ServerCallContext | None = None
     ) -> Task | None:
-        """Load one task only if visible to the active principal."""
+        """Load one task only if visible to the active principal.
+
+        Returns ``None`` when the requesting user is unauthenticated
+        (``owner_user_id`` resolves to ``None``) to prevent information
+        leakage across anonymous requests.
+        """
+        owner_user_id = _owner_from_context(context)
+        if owner_user_id is None:
+            return None
+
         record = self._tasks.get(task_id)
         if record is None:
             return None
 
-        owner_user_id = _owner_from_context(context)
         if record.owner_user_id != owner_user_id:
             return None
 
@@ -70,12 +86,19 @@ class HaScopedTaskStore(TaskStore):
     async def delete(
         self, task_id: str, context: ServerCallContext | None = None
     ) -> None:
-        """Delete a task when visible to the active principal."""
+        """Delete a task when visible to the active principal.
+
+        Silently no-ops when the requesting user is unauthenticated or
+        does not own the task.
+        """
+        owner_user_id = _owner_from_context(context)
+        if owner_user_id is None:
+            return
+
         record = self._tasks.get(task_id)
         if record is None:
             return
 
-        owner_user_id = _owner_from_context(context)
         if record.owner_user_id != owner_user_id:
             return
 
@@ -90,7 +113,14 @@ class HaScopedTaskStore(TaskStore):
         page_size: int,
         page_token: str,
     ) -> tuple[list[Task], str, int]:
-        """List principal-visible tasks for local `tasks/list` extension."""
+        """List principal-visible tasks for local `tasks/list` extension.
+
+        Returns an empty result when ``owner_user_id`` is ``None`` to
+        prevent unauthenticated callers from seeing any tasks.
+        """
+        if owner_user_id is None:
+            return [], "", 0
+
         filtered: list[Task] = []
         for record in self._tasks.values():
             task = record.task

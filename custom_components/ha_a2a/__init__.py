@@ -45,5 +45,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
+    """Unload a config entry and clean up runtime objects."""
+    domain_data = hass.data.get(DOMAIN)
+    if domain_data is not None:
+        runtimes: dict[str, AssistantRuntime] = domain_data.get(DATA_STORE, {})
+        runtimes.clear()
     return True

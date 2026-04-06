@@ -12,8 +12,10 @@ from a2a.types import (
     AgentCard,
     AgentInterface,
     AgentSkill,
+    HTTPAuthSecurityScheme,
     JSONRPCErrorResponse,
     JSONRPCSuccessResponse,
+    SecurityScheme,
     Task,
     TaskState,
     TransportProtocol,
@@ -26,6 +28,11 @@ from .const import (
     SUPPORTED_A2A_VERSION,
 )
 
+_DEFAULT_SKILL_EXAMPLES: list[str] = [
+    "Turn off the hallway lights.",
+    "Set the thermostat to 70 degrees.",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class A2AAssistantAgent:
@@ -34,6 +41,9 @@ class A2AAssistantAgent:
     assistant_id: str
     name: str
     supports_streaming: bool
+    skill_description: str | None = None
+    skill_tags: tuple[str, ...] | None = None
+    skill_examples: tuple[str, ...] | None = None
 
 
 def build_agent_card_path(assistant_id: str) -> str:
@@ -45,6 +55,37 @@ def build_agent_interface_path(assistant_id: str) -> str:
     """Build an assistant-specific interface path with proper escaping."""
     return AGENT_INTERFACE_PATH_TEMPLATE.format(
         assistant_id=quote(assistant_id, safe="")
+    )
+
+
+def _build_agent_skill(agent: A2AAssistantAgent) -> AgentSkill:
+    """Build an AgentSkill from assistant metadata with optional overrides."""
+    description = agent.skill_description or (
+        f"Conversational task execution via the '{agent.name}' "
+        "Home Assistant assistant."
+    )
+    tags = (
+        list(agent.skill_tags)
+        if agent.skill_tags
+        else [
+            "assistant",
+            "conversation",
+            "home-assistant",
+        ]
+    )
+    examples = (
+        list(agent.skill_examples)
+        if agent.skill_examples
+        else list(_DEFAULT_SKILL_EXAMPLES)
+    )
+    return AgentSkill(
+        id=agent.assistant_id,
+        name=f"{agent.name} conversation",
+        description=description,
+        tags=tags,
+        examples=examples,
+        input_modes=["text/plain"],
+        output_modes=["text/plain"],
     )
 
 
@@ -77,24 +118,18 @@ def build_agent_card(
             push_notifications=False,
             state_transition_history=True,
         ),
-        security_schemes={},
-        security=[],
+        security_schemes={
+            "bearer": SecurityScheme(
+                root=HTTPAuthSecurityScheme(
+                    scheme="bearer",
+                    bearer_format="Long-Lived Access Token",
+                )
+            ),
+        },
+        security=[{"bearer": []}],
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
-        skills=[
-            AgentSkill(
-                id=agent.assistant_id,
-                name=f"{agent.name} conversation",
-                description="Conversational task execution via Home Assistant.",
-                tags=["assistant", "conversation", "home-assistant"],
-                examples=[
-                    "Turn off the hallway lights.",
-                    "Set the thermostat to 70 degrees.",
-                ],
-                input_modes=["text/plain"],
-                output_modes=["text/plain"],
-            )
-        ],
+        skills=[_build_agent_skill(agent)],
     )
 
 

@@ -86,3 +86,48 @@ async def test_list_tasks_paginates_and_filters() -> None:
     assert len(page) == 1
     assert page[0].id == "t-1"
     assert next_token == ""
+
+
+def _none_context() -> ServerCallContext:
+    """Context with no authenticated user."""
+    return ServerCallContext(state={})
+
+
+@pytest.mark.asyncio
+async def test_save_rejects_none_owner() -> None:
+    """Save must raise when owner_user_id resolves to None."""
+    store = STORE.HaScopedTaskStore()
+    with pytest.raises(ValueError, match="authenticated owner"):
+        await store.save(_task("t-1", "c-1", TaskState.submitted), _none_context())
+
+
+@pytest.mark.asyncio
+async def test_get_returns_none_for_none_owner() -> None:
+    """Get must return None when requesting user is unauthenticated."""
+    store = STORE.HaScopedTaskStore()
+    await store.save(_task("t-1", "c-1", TaskState.completed), _context("user-1"))
+    assert await store.get("t-1", _none_context()) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_noop_for_none_owner() -> None:
+    """Delete must silently no-op when requesting user is unauthenticated."""
+    store = STORE.HaScopedTaskStore()
+    await store.save(_task("t-1", "c-1", TaskState.completed), _context("user-1"))
+    await store.delete("t-1", _none_context())
+    # Task should still exist for the real owner
+    assert await store.get("t-1", _context("user-1")) is not None
+
+
+def test_list_tasks_empty_for_none_owner() -> None:
+    """list_tasks must return empty when owner is None."""
+    store = STORE.HaScopedTaskStore()
+    page, _next_token, total = store.list_tasks(
+        owner_user_id=None,
+        context_id=None,
+        status=None,
+        page_size=50,
+        page_token="0",
+    )
+    assert page == []
+    assert total == 0
